@@ -1,0 +1,142 @@
+
+#include <Wire.h>
+#include <Adafruit_MLX90640.h>
+#include <DHT.h>
+
+// --- Pin Definitions ---
+#define MQ2_PIN 34
+#define DHT_PIN 4
+#define BUZZER_PIN 18
+#define LED_PIN 19
+
+// --- Sensor Setup ---
+#define DHTTYPE DHT22
+
+DHT dht(DHT_PIN, DHTTYPE);
+Adafruit_MLX90640 mlx;
+
+// Thermal camera frame buffer (32x24 pixels)
+float frame[32 * 24];
+
+// --- Safety Thresholds ---
+// Adjust these based on your testing environment
+const float HOTSPOT_THRESHOLD = 60.0;  // Celsius
+const int SMOKE_THRESHOLD = 2000;      // ADC value (0-4095)
+const float AMBIENT_TEMP_LIMIT = 45.0; // Celsius
+
+// --- Timing Variables (Non-blocking) ---
+unsigned long previousMillisDHT = 0;
+const long intervalDHT = 2000;  // Read DHT every 2 seconds
+
+void setup() {
+    Serial.begin(115200);
+
+    while (!Serial) {
+        delay(10);
+    }
+
+    // Initialize pins
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(LED_PIN, OUTPUT);
+
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(LED_PIN, LOW);
+
+    // Initialize DHT22
+    dht.begin();
+
+    // Initialize MLX90640
+    Serial.println("Initializing MLX90640...");
+
+    if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire)) {
+        Serial.println("Thermal camera not found. Check wiring!");
+
+        while (1) {
+            delay(10);
+        }
+    }
+
+    // Optimize thermal camera settings
+    mlx.setMode(MLX90640_CHESS);
+    mlx.setResolution(MLX90640_ADC_18BIT);
+    mlx.setRefreshRate(MLX90640_4_HZ);
+
+    Wire.setClock(1000000);  // I2C clock: 1 MHz
+
+    Serial.println("System Ready. Monitoring...");
+}
+
+void loop() {
+    unsigned long currentMillis = millis();
+
+    // 1. Read MQ-2 smoke sensor
+    int smokeLevel = analogRead(MQ2_PIN);
+
+    // 2. Read DHT22 temperature every 2 seconds
+    float ambientTemp = 0.0;
+
+    if (currentMillis - previousMillisDHT >= intervalDHT) {
+        previousMillisDHT = currentMillis;
+
+        ambientTemp = dht.readTemperature();
+
+        if (isnan(ambientTemp)) {
+            Serial.println("Failed to read from DHT sensor!");
+        }
+    }
+
+    // 3. Read MLX90640 thermal grid
+    float maxGridTemp = 0.0;
+
+    if (mlx.getFrame(frame) == 0) {
+        // Find the hottest spot among 768 pixels
+        for (uint16_t h = 0; h < 768; h++) {
+            if (frame[h] > maxGridTemp) {
+                maxGridTemp = frame[h];
+            }
+        }
+    }
+
+    // 4. Logic and alarm evaluation
+    bool hotspotDetected =
+        (maxGridTemp >= HOTSPOT_THRESHOLD);
+
+    bool smokeDetected =
+        (smokeLevel >= SMOKE_THRESHOLD);
+
+    bool ambientTooHot =
+        (ambientTemp >= AMBIENT_TEMP_LIMIT);
+
+    // Print sensor data to Serial Monitor
+    Serial.print("Smoke ADC: ");
+    Serial.print(smokeLevel);
+
+    Serial.print(" | Max Grid Temp: ");
+    Serial.print(maxGridTemp);
+
+    Serial.print(" C | Ambient: ");
+    Serial.println(ambientTemp);
+
+    // Trigger condition:
+    // High ambient temperature OR (hotspot AND smoke)
+    if (ambientTooHot || (hotspotDetected && smokeDetected)) {
+        triggerAlarm(true);
+        Serial.println("FIRE DETECTED! ALARM ACTIVE");
+    } else {
+        triggerAlarm(false);
+    }
+
+    // Small delay for stability
+    delay(100);
+}
+
+// Function to handle local warnings
+void triggerAlarm(bool state) {
+    if (state) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        digitalWrite(LED_PIN, HIGH);
+    } else {
+        digitalWrite(BUZZER_PIN, LOW);
+        digitalWrite(LED_PIN, LOW);
+    }
+}

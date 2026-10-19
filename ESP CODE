@@ -1,0 +1,127 @@
+
+#define BLYNK_TEMPLATE_ID "TMPLxxxxxx"
+#define BLYNK_TEMPLATE_NAME "Fire Detection System"
+#define BLYNK_AUTH_TOKEN "Your_Auth_Token_Here"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <Wire.h>
+#include <Adafruit_MLX90640.h>
+#include <DHT.h>
+
+// --- WiFi Credentials ---
+char ssid[] = "Zaraa";
+char pass[] = "Pass35**";
+
+// --- Pin Definitions ---
+#define MQ2_PIN 34
+#define DHT_PIN 4
+#define BUZZER_PIN 18
+#define LED_PIN 19
+
+// --- Sensor Setup ---
+#define DHTTYPE DHT22
+
+DHT dht(DHT_PIN, DHTTYPE);
+Adafruit_MLX90640 mlx;
+
+float frame[32 * 24];
+
+// --- Safety Thresholds ---
+const float HOTSPOT_THRESHOLD = 60.0;
+const int SMOKE_THRESHOLD = 2000;
+const float AMBIENT_TEMP_LIMIT = 45.0;
+
+BlynkTimer timer;
+
+bool alertSent = false;  // Prevents repeated push notifications
+
+void setup() {
+    Serial.begin(115200);
+
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(LED_PIN, OUTPUT);
+
+    digitalWrite(BUZZER_PIN, LOW);
+    digitalWrite(LED_PIN, LOW);
+
+    dht.begin();
+
+    if (!mlx.begin(MLX90640_I2CADDR_DEFAULT, &Wire)) {
+        Serial.println("Thermal camera not found.");
+
+        while (1) {
+            delay(10);
+        }
+    }
+
+    mlx.setMode(MLX90640_CHESS);
+    mlx.setResolution(MLX90640_ADC_18BIT);
+    mlx.setRefreshRate(MLX90640_4_HZ);
+
+    Wire.setClock(1000000);
+
+    // Connect to WiFi and Blynk
+    Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+    // Run sendSensorData() every 2 seconds
+    timer.setInterval(2000L, sendSensorData);
+}
+
+void sendSensorData() {
+    // 1. Read sensors
+    int smokeLevel = analogRead(MQ2_PIN);
+    float ambientTemp = dht.readTemperature();
+
+    float maxGridTemp = 0.0;
+
+    if (mlx.getFrame(frame) == 0) {
+        for (uint16_t h = 0; h < 768; h++) {
+            if (frame[h] > maxGridTemp) {
+                maxGridTemp = frame[h];
+            }
+        }
+    }
+
+    // 2. Send data to Blynk
+    Blynk.virtualWrite(V0, smokeLevel);
+    Blynk.virtualWrite(V1, ambientTemp);
+    Blynk.virtualWrite(V2, maxGridTemp);
+
+    // 3. Evaluate alerts
+    bool hotspotDetected =
+        (maxGridTemp >= HOTSPOT_THRESHOLD);
+
+    bool smokeDetected =
+        (smokeLevel >= SMOKE_THRESHOLD);
+
+    bool ambientTooHot =
+        (ambientTemp >= AMBIENT_TEMP_LIMIT);
+
+    if (ambientTooHot || (hotspotDetected && smokeDetected)) {
+        digitalWrite(BUZZER_PIN, HIGH);
+        digitalWrite(LED_PIN, HIGH);
+
+        // Send notification only once per alert period
+        if (!alertSent) {
+            Blynk.logEvent(
+                "fire_alert",
+                "FIRE RISK DETECTED! Check Dashboard."
+            );
+
+            alertSent = true;
+        }
+    } else {
+        digitalWrite(BUZZER_PIN, LOW);
+        digitalWrite(LED_PIN, LOW);
+
+        // Reset alert when conditions become safe
+        alertSent = false;
+    }
+}
+
+void loop() {
+    Blynk.run();  // Maintain Blynk connection
+    timer.run();  // Run scheduled tasks
+}
